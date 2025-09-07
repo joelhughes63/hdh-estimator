@@ -1,0 +1,1173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Honey-Do Hero — Estimator v1.4</title>
+
+  <!-- Tailwind (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React + ReactDOM (CDN) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <!-- Babel so we can paste JSX directly -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    /* print tweaks */
+    @media print {
+      .print\:hidden { display: none !important; }
+      body { background: #fff !important; }
+    }
+  </style>
+</head>
+<body class="bg-slate-50">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useRef, useState } = React;
+
+    // ===============================
+    // Honey-Do Hero — Estimator (v1.4)
+    // ===============================
+    function EstimatorApp() {
+      // ---- Project Info ----
+      const [project, setProject] = useState({
+        clientName: "",
+        projectName: "",
+        location: "",
+        estimateNo: "",
+        date: new Date().toISOString().slice(0, 10),
+      });
+
+      // ---- Materials ----
+      const [materials, setMaterials] = useState([
+        { id: cid(), desc: "", qty: 1, unitCost: 0, taxable: true },
+      ]);
+
+      // ---- Labor ----
+      const [labor, setLabor] = useState([
+        { id: cid(), role: "", rate: 0, hours: 0 },
+      ]);
+
+      // ---- Other services ----
+      const [other, setOther] = useState([
+        { id: cid(), desc: "", cost: 0 },
+      ]);
+
+      // ---- Settings ----
+      const [settings, setSettings] = useState({
+        taxRate: 8.25,            // percent
+        taxLabor: false,          // materials-only tax by default
+        markupPct: 0,             // % applied to materials subtotal
+        contingencyPct: 0,        // % applied to materials subtotal
+        depositPct: 50,           // requested deposit %
+        roundTotal: true,
+        notes:
+          "Pricing subject to onsite findings. Fresh treated lumber should cure 30–60 days before paint. 50% deposit required to schedule.",
+
+        // AI defaults (OpenAI Images Edit)
+        aiProvider: "openai",     // 'openai' | 'custom'
+        aiProviderUrl: "",        // used if aiProvider==='custom'
+        aiApiKey: "",             // paste your API key (stored locally)
+        aiMaxSize: 1024,          // px long side (OpenAI uses square sizes)
+        aiMaskMode: "white_edit", // we paint white where we want edits
+      });
+
+      // ---- Photos & Renders ----
+      const [photos, setPhotos] = useState([]); // {id,name,url,note}
+      const fileInputRef = useRef(null);
+      const [renders, setRenders] = useState([]); // {id,photoId,styleNote,maskDataUrl?,afterUrl?}
+
+      // ---- Persistence ----
+      useEffect(() => {
+        const saved = localStorage.getItem("hdh-estimator-v1");
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved);
+            if (parsed.project) setProject(parsed.project);
+            if (parsed.materials) setMaterials(parsed.materials);
+            if (parsed.labor) setLabor(parsed.labor);
+            if (parsed.other) setOther(parsed.other);
+            if (parsed.settings) setSettings(parsed.settings);
+            if (parsed.photos) setPhotos(parsed.photos);
+            if (parsed.renders) setRenders(parsed.renders);
+          } catch {}
+        }
+      }, []);
+
+      useEffect(() => {
+        localStorage.setItem(
+          "hdh-estimator-v1",
+          JSON.stringify({ project, materials, labor, other, settings, photos, renders })
+        );
+      }, [project, materials, labor, other, settings, photos, renders]);
+
+      // ---- Totals ----
+      const matSubtotal = useMemo(
+        () => sum(materials.map((m) => n(m.qty) * n(m.unitCost))),
+        [materials]
+      );
+      const matTaxable = useMemo(
+        () => sum(materials.filter((m) => m.taxable).map((m) => n(m.qty) * n(m.unitCost))),
+        [materials]
+      );
+      const matMarkup = useMemo(
+        () => matSubtotal * (n(settings.markupPct) / 100),
+        [matSubtotal, settings.markupPct]
+      );
+      const matContingency = useMemo(
+        () => matSubtotal * (n(settings.contingencyPct) / 100),
+        [matSubtotal, settings.contingencyPct]
+      );
+      const laborSubtotal = useMemo(
+        () => sum(labor.map((l) => n(l.rate) * n(l.hours))),
+        [labor]
+      );
+      const otherTotal = useMemo(
+        () => sum(other.map((o) => n(o.cost))),
+        [other]
+      );
+
+      // Tax base = taxable materials (+ markup + contingency). Optionally includes labor if toggled.
+      const matTax = useMemo(() => {
+        const base =
+          matTaxable +
+          matMarkup +
+          matContingency +
+          (settings.taxLabor ? laborSubtotal : 0);
+        return base * (n(settings.taxRate) / 100);
+      }, [matTaxable, matMarkup, matContingency, settings.taxLabor, laborSubtotal, settings.taxRate]);
+
+      const grandTotalRaw = useMemo(
+        () => matSubtotal + matMarkup + matContingency + matTax + laborSubtotal + otherTotal,
+        [matSubtotal, matMarkup, matContingency, matTax, laborSubtotal, otherTotal]
+      );
+      const grandTotal = useMemo(
+        () => (settings.roundTotal ? Math.round(grandTotalRaw) : round2(grandTotalRaw)),
+        [grandTotalRaw, settings.roundTotal]
+      );
+      const deposit = useMemo(
+        () => round2(grandTotal * (n(settings.depositPct) / 100)),
+        [grandTotal, settings.depositPct]
+      );
+
+      // ---- File handlers ----
+      const onPickFiles = () => fileInputRef.current?.click();
+      const onFilesSelected = (files) => {
+        const next = [];
+        for (const file of files) {
+          if (!file.type.startsWith("image/")) continue;
+          const url = URL.createObjectURL(file);
+          next.push({ id: cid(), name: file.name, url, note: "" });
+        }
+        setPhotos((prev) => [...prev, ...next]);
+      };
+      const removePhoto = (id) => {
+        setPhotos((prev) => {
+          const found = prev.find((p) => p.id === id);
+          if (found) URL.revokeObjectURL(found.url);
+          return prev.filter((p) => p.id !== id);
+        });
+      };
+      useEffect(() => () => photos.forEach((p) => URL.revokeObjectURL(p.url)), [photos]);
+
+      // ---- Generation handlers ----
+      async function handleGenerate(r, p) {
+        try {
+          if (!r.maskDataUrl) {
+            alert('Please create a mask first.');
+            return;
+          }
+          const afterUrl = await generateAfterImage({
+            photo: p,
+            maskDataUrl: r.maskDataUrl,
+            prompt: r.styleNote,
+          });
+          setRenders((rs) => rs.map((x) => (x.id === r.id ? { ...x, afterUrl } : x)));
+        } catch (e) {
+          alert(e.message || "Generation failed");
+        }
+      }
+
+      const resetAll = () => {
+        if (!confirm("Clear all data?")) return;
+        localStorage.removeItem("hdh-estimator-v1");
+        window.location.reload();
+      };
+      const printDoc = () => window.print();
+
+      // ---- UI ----
+      return (
+        <div className="min-h-screen bg-slate-50 text-slate-900 p-6">
+          <div className="max-w-6xl mx-auto space-y-6">
+            <Header onPrint={printDoc} onReset={resetAll} />
+
+            {/* Project Info */}
+            <Card>
+              <h2 className="text-xl font-semibold mb-4">Project Info</h2>
+              <div className="grid md:grid-cols-2 gap-4">
+                <Input label="Client Name" value={project.clientName} onChange={(v) => setProject({ ...project, clientName: v })} />
+                <Input label="Project Name" value={project.projectName} onChange={(v) => setProject({ ...project, projectName: v })} />
+                <Input label="Location" value={project.location} onChange={(v) => setProject({ ...project, location: v })} />
+                <Input label="Estimate #" value={project.estimateNo} onChange={(v) => setProject({ ...project, estimateNo: v })} />
+                <Input label="Date" type="date" value={project.date} onChange={(v) => setProject({ ...project, date: v })} />
+              </div>
+            </Card>
+
+            {/* Materials */}
+            <Card>
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-xl font-semibold">Materials</h2>
+                <button
+                  className="px-3 py-1 rounded-xl shadow bg-white hover:bg-slate-100"
+                  onClick={() =>
+                    setMaterials((ms) => [
+                      ...ms,
+                      { id: cid(), desc: "", qty: 1, unitCost: 0, taxable: true },
+                    ])
+                  }
+                >
+                  + Add Item
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-slate-200 text-slate-700">
+                      <th className="p-2 text-left">Description</th>
+                      <th className="p-2">Qty</th>
+                      <th className="p-2">Unit $</th>
+                      <th className="p-2">Taxable</th>
+                      <th className="p-2">Line Total</th>
+                      <th className="p-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {materials.map((m) => (
+                      <tr key={m.id} className="border-b">
+                        <td className="p-2">
+                          <input
+                            className="w-full bg-white rounded-xl px-3 py-2 border"
+                            value={m.desc}
+                            onChange={(e) =>
+                              setMaterials((ms) =>
+                                ms.map((x) => (x.id === m.id ? { ...x, desc: e.target.value } : x))
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="p-2 text-center">
+                          <input
+                            type="number"
+                            className="w-24 bg-white rounded-xl px-3 py-2 border text-center"
+                            value={m.qty}
+                            onChange={(e) =>
+                              setMaterials((ms) =>
+                                ms.map((x) => (x.id === m.id ? { ...x, qty: n(e.target.value) } : x))
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="p-2 text-center">
+                          <input
+                            type="number"
+                            className="w-28 bg-white rounded-xl px-3 py-2 border text-center"
+                            value={m.unitCost}
+                            onChange={(e) =>
+                              setMaterials((ms) =>
+                                ms.map((x) =>
+                                  x.id === m.id ? { ...x, unitCost: n(e.target.value) } : x
+                                )
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="p-2 text-center">
+                          <input
+                            type="checkbox"
+                            checked={!!m.taxable}
+                            onChange={(e) =>
+                              setMaterials((ms) =>
+                                ms.map((x) =>
+                                  x.id === m.id ? { ...x, taxable: e.target.checked } : x
+                                )
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="p-2 text-center font-semibold">
+                          ${(n(m.qty) * n(m.unitCost)).toFixed(2)}
+                        </td>
+                        <td className="p-2 text-center">
+                          <button
+                            className="text-red-600 hover:underline"
+                            onClick={() =>
+                              setMaterials((ms) => ms.filter((x) => x.id !== m.id))
+                            }
+                          >
+                            Remove
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="grid md:grid-cols-4 gap-4 mt-4 text-sm">
+                <Stat label="Materials Subtotal" value={fmt(matSubtotal)} />
+                <Stat label="Markup" value={fmt(matMarkup)} />
+                <Stat label="Contingency" value={fmt(matContingency)} />
+                <Stat label={`Sales Tax (${settings.taxRate}%)`} value={fmt(matTax)} />
+              </div>
+            </Card>
+
+            {/* Labor */}
+            <Card>
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-xl font-semibold">Labor</h2>
+                <button
+                  className="px-3 py-1 rounded-xl shadow bg-white hover:bg-slate-100"
+                  onClick={() => setLabor((ls) => [...ls, { id: cid(), role: "", rate: 0, hours: 0 }])}
+                >
+                  + Add Role
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-slate-200 text-slate-700">
+                      <th className="p-2 text-left">Role</th>
+                      <th className="p-2">Rate $/hr</th>
+                      <th className="p-2">Hours</th>
+                      <th className="p-2">Subtotal</th>
+                      <th className="p-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {labor.map((l) => (
+                      <tr key={l.id} className="border-b">
+                        <td className="p-2">
+                          <input
+                            className="w-full bg-white rounded-xl px-3 py-2 border"
+                            value={l.role}
+                            onChange={(e) =>
+                              setLabor((ls) =>
+                                ls.map((x) => (x.id === l.id ? { ...x, role: e.target.value } : x))
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="p-2 text-center">
+                          <input
+                            type="number"
+                            className="w-28 bg-white rounded-xl px-3 py-2 border text-center"
+                            value={l.rate}
+                            onChange={(e) =>
+                              setLabor((ls) =>
+                                ls.map((x) => (x.id === l.id ? { ...x, rate: n(e.target.value) } : x))
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="p-2 text-center">
+                          <input
+                            type="number"
+                            className="w-24 bg-white rounded-xl px-3 py-2 border text-center"
+                            value={l.hours}
+                            onChange={(e) =>
+                              setLabor((ls) =>
+                                ls.map((x) => (x.id === l.id ? { ...x, hours: n(e.target.value) } : x))
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="p-2 text-center font-semibold">
+                          ${(n(l.rate) * n(l.hours)).toFixed(2)}
+                        </td>
+                        <td className="p-2 text-center">
+                          <button
+                            className="text-red-600 hover:underline"
+                            onClick={() => setLabor((ls) => ls.filter((x) => x.id !== l.id))}
+                          >
+                            Remove
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="grid md:grid-cols-3 gap-4 mt-4 text-sm">
+                <Stat label="Labor Total" value={fmt(laborSubtotal)} />
+                <Stat label="Other Services" value={fmt(otherTotal)} />
+                <Stat label="Grand Total" value={fmt(grandTotal)} />
+              </div>
+            </Card>
+
+            {/* Other Services */}
+            <Card>
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-xl font-semibold">Other Services / Flat Items</h2>
+                <button
+                  className="px-3 py-1 rounded-xl shadow bg-white hover:bg-slate-100"
+                  onClick={() => setOther((os) => [...os, { id: cid(), desc: "", cost: 0 }])}
+                >
+                  + Add Item
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-slate-200 text-slate-700">
+                      <th className="p-2 text-left">Description</th>
+                      <th className="p-2">Cost</th>
+                      <th className="p-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {other.map((o) => (
+                      <tr key={o.id} className="border-b">
+                        <td className="p-2">
+                          <input
+                            className="w-full bg-white rounded-xl px-3 py-2 border"
+                            value={o.desc}
+                            onChange={(e) =>
+                              setOther((os) =>
+                                os.map((x) => (x.id === o.id ? { ...x, desc: e.target.value } : x))
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="p-2 text-center">
+                          <input
+                            type="number"
+                            className="w-32 bg-white rounded-xl px-3 py-2 border text-center"
+                            value={o.cost}
+                            onChange={(e) =>
+                              setOther((os) =>
+                                os.map((x) => (x.id === o.id ? { ...x, cost: n(e.target.value) } : x))
+                              )
+                            }
+                          />
+                        </td>
+                        <td className="p-2 text-center">
+                          <button
+                            className="text-red-600 hover:underline"
+                            onClick={() => setOther((os) => os.filter((x) => x.id !== o.id))}
+                          >
+                            Remove
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+
+            {/* Photos */}
+            <Card>
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-xl font-semibold">Photos</h2>
+                <div className="flex gap-2">
+                  <button className="px-3 py-1 rounded-xl shadow bg-white hover:bg-slate-100" onClick={onPickFiles}>
+                    + Add Photos
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => onFilesSelected(e.target.files)}
+                  />
+                </div>
+              </div>
+              {photos.length === 0 ? (
+                <p className="text-sm text-slate-600">
+                  No photos yet. Click "Add Photos" to upload images of the space.
+                </p>
+              ) : (
+                <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
+                  {photos.map((p) => (
+                    <div key={p.id} className="border rounded-2xl overflow-hidden bg-white">
+                      <img src={p.url} alt={p.name} className="w-full h-48 object-cover" />
+                      <div className="p-3 space-y-2">
+                        <div className="text-xs text-slate-600 truncate" title={p.name}>
+                          {p.name}
+                        </div>
+                        <textarea
+                          className="w-full bg-white rounded-xl px-3 py-2 border"
+                          rows={2}
+                          placeholder="Notes about this photo (e.g., replace boards left side)"
+                          value={p.note}
+                          onChange={(e) =>
+                            setPhotos((prev) =>
+                              prev.map((x) => (x.id === p.id ? { ...x, note: e.target.value } : x))
+                            )
+                          }
+                        />
+                        <div className="flex items-center justify-between">
+                          <button
+                            className="text-blue-700 text-sm hover:underline"
+                            onClick={() =>
+                              setRenders((rs) => [
+                                ...rs,
+                                { id: cid(), photoId: p.id, styleNote: "" },
+                              ])
+                            }
+                          >
+                            Queue Concept Render
+                          </button>
+                          <button
+                            className="text-red-600 text-sm hover:underline"
+                            onClick={() => removePhoto(p.id)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+
+            {/* Concept Renders */}
+            <Card>
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-xl font-semibold">Concept Renders (AI)</h2>
+                <div className="flex gap-2">
+                  <button
+                    className="px-3 py-1 rounded-xl shadow bg-white hover:bg-slate-100"
+                    onClick={() => exportRenderBrief({ project, photos, renders })}
+                  >
+                    Export Render Brief (JSON)
+                  </button>
+                </div>
+              </div>
+              {renders.length === 0 ? (
+                <p className="text-sm text-slate-600">
+                  No renders queued. Use "Queue Concept Render" on a photo to add one. You can paint a mask over the
+                  area to change and generate an after image here.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {renders.map((r) => {
+                    const p = photos.find((x) => x.id === r.photoId);
+                    return (
+                      <div key={r.id} className="border rounded-2xl p-3 bg-white">
+                        <div className="flex gap-3">
+                          {p && (
+                            <img src={p.url} alt={p?.name} className="w-24 h-24 object-cover rounded" />
+                          )}
+                          <div className="flex-1">
+                            <div className="text-sm font-medium">
+                              Source: {p?.name || "(photo removed)"}
+                            </div>
+                            <textarea
+                              className="w-full bg-white rounded-xl px-3 py-2 border mt-2"
+                              rows={2}
+                              placeholder="Style / changes (e.g., whitewash brick mantle, keep mortar texture)"
+                              value={r.styleNote || ""}
+                              onChange={(e) =>
+                                setRenders((rs) =>
+                                  rs.map((x) =>
+                                    x.id === r.id ? { ...x, styleNote: e.target.value } : x
+                                  )
+                                )
+                              }
+                            />
+                            {p && (
+                              <div className="mt-2 flex items-center justify-end gap-2 text-sm">
+                                <MaskButton
+                                  photo={p}
+                                  onSaved={(maskDataUrl) =>
+                                    setRenders((rs) =>
+                                      rs.map((x) =>
+                                        x.id === r.id ? { ...x, maskDataUrl } : x
+                                      )
+                                    )
+                                  }
+                                />
+                                <button
+                                  className="px-3 py-1 bg-slate-900 text-white rounded-xl"
+                                  onClick={() => handleGenerate(r, p)}
+                                >
+                                  Generate After
+                                </button>
+                                <button
+                                  className="px-3 py-1 bg-white border rounded-xl"
+                                  onClick={() => handleGenerate(r, p)}
+                                >
+                                  Regenerate
+                                </button>
+                                <button
+                                  className="text-red-600 hover:underline"
+                                  onClick={() =>
+                                    setRenders((rs) => rs.filter((x) => x.id !== r.id))
+                                  }
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            )}
+                            {r.afterUrl && (
+                              <div className="mt-3">
+                                <BeforeAfter beforeUrl={p?.url} afterUrl={r.afterUrl} />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+
+            {/* Settings */}
+            <Card>
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-xl font-semibold">Settings</h2>
+              </div>
+              <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
+                <NumberInput label="Sales Tax %" value={settings.taxRate} onChange={(v) => setSettings({ ...settings, taxRate: v })} />
+                <Toggle label="Apply Tax to Labor" checked={settings.taxLabor} onChange={(v) => setSettings({ ...settings, taxLabor: v })} />
+                <NumberInput label="Markup % (materials)" value={settings.markupPct} onChange={(v) => setSettings({ ...settings, markupPct: v })} />
+                <NumberInput label="Contingency % (materials)" value={settings.contingencyPct} onChange={(v) => setSettings({ ...settings, contingencyPct: v })} />
+                <NumberInput label="Deposit %" value={settings.depositPct} onChange={(v) => setSettings({ ...settings, depositPct: v })} />
+                <Toggle label="Round Grand Total" checked={settings.roundTotal} onChange={(v) => setSettings({ ...settings, roundTotal: v })} />
+                <Select
+                  label="AI Provider"
+                  value={settings.aiProvider}
+                  onChange={(v) => setSettings({ ...settings, aiProvider: v })}
+                  options={[
+                    { label: "OpenAI (Images Edit)", value: "openai" },
+                    { label: "Custom endpoint", value: "custom" },
+                  ]}
+                />
+                {settings.aiProvider === "custom" && (
+                  <Input
+                    label="AI Provider URL"
+                    value={settings.aiProviderUrl}
+                    onChange={(v) => setSettings({ ...settings, aiProviderUrl: v })}
+                  />
+                )}
+                <Input label="AI API Key" value={settings.aiApiKey} onChange={(v) => setSettings({ ...settings, aiApiKey: v })} />
+                <NumberInput label="AI Max Size (px)" value={settings.aiMaxSize} onChange={(v) => setSettings({ ...settings, aiMaxSize: v })} />
+              </div>
+              <div className="mt-4">
+                <label className="text-sm font-medium">Notes</label>
+                <textarea
+                  className="w-full bg-white rounded-xl px-3 py-2 border mt-1"
+                  rows={3}
+                  value={settings.notes}
+                  onChange={(e) => setSettings({ ...settings, notes: e.target.value })}
+                />
+              </div>
+            </Card>
+
+            {/* Summary */}
+            <SummaryCard
+              project={project}
+              materials={{ matSubtotal, matMarkup, matContingency, matTax }}
+              laborTotal={laborSubtotal}
+              otherTotal={otherTotal}
+              grandTotal={grandTotal}
+              deposit={deposit}
+              settings={settings}
+            />
+
+            <Footer />
+          </div>
+        </div>
+      );
+    }
+
+    // ---- Components ----
+    function Header({ onPrint, onReset }) {
+      return (
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold">Honey-Do Hero — Estimator</h1>
+            <p className="text-slate-600 text-sm">
+              Build estimates, add photos & concept renders. Data saves locally to your browser.
+            </p>
+          </div>
+          <div className="flex gap-2 print:hidden">
+            <button onClick={onPrint} className="px-4 py-2 bg-slate-900 text-white rounded-xl shadow hover:opacity-90">
+              Print / Save PDF
+            </button>
+            <button onClick={onReset} className="px-4 py-2 bg-white border rounded-xl shadow hover:bg-slate-100">
+              Reset
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    function Card({ children }) {
+      return <div className="bg-white rounded-2xl shadow p-5 border border-slate-200">{children}</div>;
+    }
+
+    function Input({ label, value, onChange, type = "text" }) {
+      return (
+        <label className="text-sm">
+          <div className="font-medium mb-1">{label}</div>
+          <input
+            type={type}
+            className="w-full bg-white rounded-xl px-3 py-2 border"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+          />
+        </label>
+      );
+    }
+
+    function NumberInput({ label, value, onChange }) {
+      return (
+        <label className="text-sm">
+          <div className="font-medium mb-1">{label}</div>
+          <input
+            type="number"
+            className="w-full bg-white rounded-xl px-3 py-2 border"
+            value={value}
+            onChange={(e) => onChange(n(e.target.value))}
+          />
+        </label>
+      );
+    }
+
+    function Select({ label, value, onChange, options }) {
+      return (
+        <label className="text-sm">
+          <div className="font-medium mb-1">{label}</div>
+          <select
+            className="w-full bg-white rounded-xl px-3 py-2 border"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+          >
+            {options.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      );
+    }
+
+    function Toggle({ label, checked, onChange }) {
+      return (
+        <label className="flex items-center gap-2 text-sm select-none">
+          <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+          <span>{label}</span>
+        </label>
+      );
+    }
+
+    function Stat({ label, value }) {
+      return (
+        <div className="bg-slate-100 rounded-xl p-3 border border-slate-200">
+          <div className="text-xs text-slate-600">{label}</div>
+          <div className="text-lg font-semibold">{value}</div>
+        </div>
+      );
+    }
+
+    function SummaryCard({ project, materials, laborTotal, otherTotal, grandTotal, deposit, settings }) {
+      return (
+        <Card>
+          <h2 className="text-xl font-semibold mb-3">Summary</h2>
+          <div className="grid lg:grid-cols-3 gap-6 text-sm">
+            <div className="space-y-2">
+              <div>
+                <span className="font-medium">Client:</span> {project.clientName || "—"}
+              </div>
+              <div>
+                <span className="font-medium">Project:</span> {project.projectName || "—"}
+              </div>
+              <div>
+                <span className="font-medium">Location:</span> {project.location || "—"}
+              </div>
+              <div>
+                <span className="font-medium">Estimate #:</span> {project.estimateNo || "—"}
+              </div>
+              <div>
+                <span className="font-medium">Date:</span> {project.date || "—"}
+              </div>
+            </div>
+            <div className="space-y-1">
+              <div className="flex justify-between">
+                <span>Materials Subtotal</span>
+                <span>{fmt(materials.matSubtotal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Markup</span>
+                <span>{fmt(materials.matMarkup)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Contingency</span>
+                <span>{fmt(materials.matContingency)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Sales Tax ({settings.taxRate}%)</span>
+                <span>{fmt(materials.matTax)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Labor</span>
+                <span>{fmt(laborTotal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Other Services</span>
+                <span>{fmt(otherTotal)}</span>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between text-lg font-semibold">
+                <span>Total</span>
+                <span>{fmt(grandTotal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Deposit ({settings.depositPct}%)</span>
+                <span>{fmt(deposit)}</span>
+              </div>
+              <div>
+                <div className="text-xs text-slate-600">Notes</div>
+                <div className="bg-slate-100 rounded-xl p-2 border border-slate-200 whitespace-pre-wrap">
+                  {settings.notes}
+                </div>
+              </div>
+              <div className="flex gap-2 print:hidden">
+                <button
+                  onClick={() => window.print()}
+                  className="px-3 py-2 bg-slate-900 text-white rounded-xl shadow hover:opacity-90"
+                >
+                  Print / Save PDF
+                </button>
+              </div>
+            </div>
+          </div>
+        </Card>
+      );
+    }
+
+    function Footer() {
+      return (
+        <div className="text-center text-xs text-slate-500 py-6 print:hidden">
+          © {new Date().getFullYear()} Honey-Do Hero — Estimator v1.4
+        </div>
+      );
+    }
+
+    // ---- Mask UI Components ----
+    function MaskButton({ photo, onSaved }) {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button className="px-3 py-1 bg-white rounded-xl border" onClick={() => setOpen(true)}>
+            Edit Region
+          </button>
+          {open && (
+            <MaskModal
+              photo={photo}
+              onClose={() => setOpen(false)}
+              onSave={(maskDataUrl) => {
+                onSaved(maskDataUrl);
+                setOpen(false);
+              }}
+            />
+          )}
+        </>
+      );
+    }
+
+    function MaskModal({ photo, onClose, onSave }) {
+      const canvasRef = useRef(null);
+      const imgRef = useRef(null);
+      const [brush, setBrush] = useState(24);
+      const [drawing, setDrawing] = useState(false);
+      const [scale, setScale] = useState(1);
+
+      useEffect(() => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.src = photo.url;
+        img.onload = () => {
+          imgRef.current = img;
+          const long = Math.max(img.width, img.height);
+          const maxSide = 1024;
+          const factor = long > maxSide ? maxSide / long : 1;
+          setScale(factor);
+          const c = canvasRef.current;
+          c.width = img.width * factor;
+          c.height = img.height * factor;
+          const ctx = c.getContext("2d");
+          ctx.clearRect(0, 0, c.width, c.height);
+        };
+      }, [photo.url]);
+
+      const onPointer = (e) => {
+        const c = canvasRef.current;
+        if (!c) return;
+        const rect = c.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const ctx = c.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(x, y, brush / 2, 0, Math.PI * 2);
+        ctx.fill();
+      };
+
+      const handleDown = (e) => {
+        setDrawing(true);
+        onPointer(e);
+      };
+      const handleMove = (e) => {
+        if (drawing) onPointer(e);
+      };
+      const handleUp = () => setDrawing(false);
+
+      const handleSave = () => {
+        const c = canvasRef.current;
+        onSave(c.toDataURL("image/png"));
+      };
+      const clearMask = () => {
+        const c = canvasRef.current;
+        const ctx = c.getContext("2d");
+        ctx.clearRect(0, 0, c.width, c.height);
+      };
+
+      return (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-4xl w-full p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="font-semibold">Mask the area to change</div>
+              <button onClick={onClose} className="text-slate-600 hover:underline">
+                Close
+              </button>
+            </div>
+            <div className="grid md:grid-cols-5 gap-3">
+              <div className="md:col-span-4 bg-slate-100 rounded-xl p-2 relative">
+                {imgRef.current && (
+                  <img
+                    src={photo.url}
+                    alt="ref"
+                    style={{
+                      width: imgRef.current.width * scale,
+                      height: imgRef.current.height * scale,
+                    }}
+                    className="block rounded mb-2"
+                  />
+                )}
+                <canvas
+                  ref={canvasRef}
+                  className="absolute inset-2 rounded border border-slate-300"
+                  onMouseDown={handleDown}
+                  onMouseMove={drawing ? handleMove : undefined}
+                  onMouseUp={handleUp}
+                  onMouseLeave={handleUp}
+                />
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <div className="text-xs text-slate-600 mb-1">Brush Size</div>
+                  <input
+                    type="range"
+                    min={8}
+                    max={96}
+                    value={brush}
+                    onChange={(e) => setBrush(parseInt(e.target.value))}
+                  />
+                </div>
+                <button className="px-3 py-2 bg-white border rounded-xl" onClick={clearMask}>
+                  Clear Mask
+                </button>
+                <button className="px-3 py-2 bg-slate-900 text-white rounded-xl" onClick={handleSave}>
+                  Save Mask
+                </button>
+                <div className="text-xs text-slate-500">
+                  White = area to change. Transparent = keep as-is.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function BeforeAfter({ beforeUrl, afterUrl }) {
+      const [split, setSplit] = useState(50);
+      return (
+        <div className="relative w-full max-w-xl border rounded-2xl overflow-hidden">
+          <img src={beforeUrl} alt="before" className="w-full block" />
+          {afterUrl && (
+            <div style={{ position: "absolute", inset: 0, width: split + "%", overflow: "hidden" }}>
+              <img src={afterUrl} alt="after" className="w-full block" />
+            </div>
+          )}
+          {afterUrl && (
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={split}
+              onChange={(e) => setSplit(parseInt(e.target.value))}
+              className="absolute bottom-2 left-1/2 -translate-x-1/2 w-1/2"
+            />
+          )}
+        </div>
+      );
+    }
+
+    // ---- Utils ----
+    function cid() {
+      return Math.random().toString(36).slice(2, 11);
+    }
+    function n(v) {
+      const x = parseFloat(v);
+      return isNaN(x) ? 0 : x;
+    }
+    function sum(arr) {
+      return arr.reduce((a, b) => a + b, 0);
+    }
+    function round2(v) {
+      return Math.round((v + Number.EPSILON) * 100) / 100;
+    }
+    function fmt(v) {
+      return `$${Number(v || 0).toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+    }
+    async function dataUrlToBlob(dataUrl) {
+      const res = await fetch(dataUrl);
+      return await res.blob();
+    }
+    function b64ToBlob(b64, type = "image/png") {
+      const bin = atob(b64);
+      const len = bin.length;
+      const u8 = new Uint8Array(len);
+      for (let i = 0; i < len; i++) u8[i] = bin.charCodeAt(i);
+      return new Blob([u8], { type });
+    }
+    async function invertMaskAlpha(maskDataUrl) {
+      const img = await new Promise((resolve) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.src = maskDataUrl;
+      });
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const imgData = ctx.getImageData(0, 0, c.width, c.height);
+      const d = imgData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        // invert alpha; keep white pixel
+        d[i + 3] = 255 - d[i + 3];
+        d[i] = 255;
+        d[i + 1] = 255;
+        d[i + 2] = 255;
+      }
+      ctx.putImageData(imgData, 0, 0);
+      return c.toDataURL("image/png");
+    }
+
+    function exportRenderBrief({ project, photos, renders }) {
+      const brief = renders.map((r) => {
+        const p = photos.find((x) => x.id === r.photoId);
+        return { photoName: p?.name || "photo", notes: r.styleNote || "" };
+      });
+      const blob = new Blob([JSON.stringify({ project, brief }, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${(project.projectName || "project").replace(/\s+/g, "_")}_render_brief.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // ---- AI Provider Call (OpenAI default, custom fallback) ----
+    async function generateAfterImage({ photo, maskDataUrl, prompt }) {
+      if (!photo) throw new Error("Missing photo");
+      if (!maskDataUrl) throw new Error("Missing mask");
+
+      // Load current settings
+      const saved = localStorage.getItem("hdh-estimator-v1");
+      let cfg = {};
+      try {
+        cfg = JSON.parse(saved || "{}").settings || {};
+      } catch {}
+      const provider = cfg.aiProvider || "openai";
+      const apiKey = cfg.aiApiKey || "";
+      const providerUrl = cfg.aiProviderUrl || "";
+      const maskMode = cfg.aiMaskMode || "white_edit";
+      const size = cfg.aiMaxSize || 1024;
+
+      // Prepare blobs
+      let maskToSend = maskDataUrl;
+      if (provider === "openai" && maskMode === "white_edit") {
+        // Our mask marks edit area in white; OpenAI expects TRANSPARENT where to edit.
+        maskToSend = await invertMaskAlpha(maskDataUrl);
+      }
+      const maskBlob = await dataUrlToBlob(maskToSend);
+      const photoBlob = await fetch(photo.url).then((r) => r.blob());
+
+      if (provider === "openai") {
+        if (!apiKey) throw new Error("Missing OpenAI API key. Add it in Settings.");
+        const form = new FormData();
+        form.append("image", photoBlob, photo.name || "photo.jpg");
+        form.append("mask", maskBlob, "mask.png");
+        form.append("prompt", prompt || "");
+        form.append("model", "gpt-image-1");
+        form.append("response_format", "b64_json");
+        form.append("size", `${size}x${size}`);
+
+        const res = await fetch("https://api.openai.com/v1/images/edits", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${apiKey}` },
+          body: form,
+        });
+        if (!res.ok) throw new Error(`OpenAI error: ${res.status} ${res.statusText}`);
+        const json = await res.json();
+        const b64 = json?.data?.[0]?.b64_json;
+        if (!b64) throw new Error("OpenAI returned no image data");
+        const outBlob = b64ToBlob(b64, "image/png");
+        return URL.createObjectURL(outBlob);
+      }
+
+      // Custom provider (expects raw image response)
+      if (!providerUrl || !apiKey) {
+        console.warn("AI provider not configured. Returning original image as placeholder.");
+        return photo.url;
+      }
+      const form = new FormData();
+      form.append("image", photoBlob, photo.name || "photo.jpg");
+      form.append("mask", maskBlob, "mask.png");
+      form.append("prompt", prompt || "");
+      form.append("output", "single");
+      const res = await fetch(providerUrl, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: form,
+      });
+      if (!res.ok) throw new Error(`AI provider error: ${res.status} ${res.statusText}`);
+      const outBlob = await res.blob();
+      return URL.createObjectURL(outBlob);
+    }
+
+    // ---- Mount ----
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<EstimatorApp />);
+  </script>
+</body>
+</html>
