@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Honey-Do Hero — Estimator v1.5 (Export PDF)</title>
+  <title>Honey-Do Hero — Estimator v1.5 (Fixed PDF Export)</title>
 
   <!-- Tailwind (CDN) -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -12,7 +12,7 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
 
-  <!-- Babel so we can paste JSX directly -->
+  <!-- Babel -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <!-- html2pdf for direct PDF export -->
@@ -20,23 +20,27 @@
 
   <style>
     @media print { .print\:hidden { display: none !important; } }
+    /* Host for offscreen PDF rendering */
+    #pdf-host {
+      position: fixed;
+      left: -10000px;  /* keep it offscreen */
+      top: 0;
+      width: 816px;    /* ~8.5in at 96dpi; html2pdf will scale anyway */
+      background: #ffffff;
+      color: #0f172a;
+      z-index: -1;
+    }
   </style>
 </head>
 <body class="bg-slate-50">
   <div id="root"></div>
+  <!-- hidden container used for robust PDF export -->
+  <div id="pdf-host" aria-hidden="true"></div>
 
   <script type="text/babel">
-    const { useEffect, useMemo, useRef, useState } = React;
-
-    // ===============================
-    // Honey-Do Hero — Estimator (v1.5)
-    // - Simple editable tables (Materials / Labor / Other)
-    // - Settings (logo, tax %, deposit %, notes)
-    // - Export Bid (PDF) with branding, totals, terms & signatures
-    // ===============================
+    const { useEffect, useMemo, useState } = React;
 
     function EstimatorApp() {
-      // Project state (expanded with more fields)
       const [project, setProject] = useState({
         clientName: "",
         projectName: "",
@@ -48,17 +52,11 @@
       const [materials, setMaterials] = useState([
         { id: cid(), desc: "", qty: 1, unitCost: 0, taxable: true }
       ]);
-      const [labor, setLabor] = useState([
-        { id: cid(), role: "", rate: 0, hours: 0 }
-      ]);
-      const [other, setOther] = useState([
-        { id: cid(), desc: "", cost: 0 }
-      ]);
+      const [labor, setLabor]   = useState([{ id: cid(), role: "", rate: 0, hours: 0 }]);
+      const [other, setOther]   = useState([{ id: cid(), desc: "", cost: 0 }]);
 
-      // Settings now include logo URL and better default notes
       const [settings, setSettings] = useState({
-        logoUrl: "",                 // show on screen + PDF
-        taxRate: 8.25,               // materials tax only (labor untaxed)
+        taxRate: 8.25,
         taxLabor: false,
         markupPct: 0,
         contingencyPct: 0,
@@ -67,80 +65,35 @@
         notes:
           "• Pricing subject to onsite findings.\n" +
           "• Treated lumber should cure 30–60 days before painting.\n" +
-          "• 50% deposit to schedule; balance due upon completion.\n" +
-          "• Materials tax applies; labor not taxed.\n" +
-          "• Estimate valid for 30 days.",
+          "• 50% deposit required to schedule.\n" +
+          "• Materials tax applies; labor not taxed."
       });
 
-      // (Photos/renders omitted here to keep it simple & focused on PDF export.)
+      // basic totals (your current simplified version)
+      const matSubtotal   = useMemo(()=> sum(materials.map(m => n(m.qty) * n(m.unitCost))), [materials]);
+      const laborSubtotal = useMemo(()=> sum(labor.map(l => n(l.rate) * n(l.hours))), [labor]);
+      const otherTotal    = useMemo(()=> sum(other.map(o => n(o.cost))), [other]);
+      const grandTotalRaw = useMemo(()=> matSubtotal + laborSubtotal + otherTotal, [matSubtotal, laborSubtotal, otherTotal]);
+      const grandTotal    = useMemo(()=> settings.roundTotal ? Math.round(grandTotalRaw) : round2(grandTotalRaw), [grandTotalRaw, settings.roundTotal]);
+      const deposit       = useMemo(()=> round2(grandTotal * (n(settings.depositPct)/100)), [grandTotal, settings.depositPct]);
 
-      const fileInputRef = useRef(null);
-
-      // Save/load localStorage
+      // persistence (same key you were using)
       useEffect(() => {
         const saved = localStorage.getItem("hdh-estimator-v1");
         if (saved) {
           try {
-            const p = JSON.parse(saved);
-            if (p.project) setProject(p.project);
-            if (p.materials) setMaterials(p.materials);
-            if (p.labor) setLabor(p.labor);
-            if (p.other) setOther(p.other);
-            if (p.settings) setSettings(prev => ({ ...prev, ...p.settings }));
+            const s = JSON.parse(saved);
+            s.project && setProject(s.project);
+            s.materials && setMaterials(s.materials);
+            s.labor && setLabor(s.labor);
+            s.other && setOther(s.other);
+            s.settings && setSettings(prev => ({ ...prev, ...s.settings }));
           } catch {}
         }
       }, []);
-
       useEffect(() => {
-        localStorage.setItem(
-          "hdh-estimator-v1",
-          JSON.stringify({ project, materials, labor, other, settings })
-        );
+        localStorage.setItem("hdh-estimator-v1", JSON.stringify({ project, materials, labor, other, settings }));
       }, [project, materials, labor, other, settings]);
-
-      // Totals
-      const matSubtotal = useMemo(
-        () => sum(materials.map(m => n(m.qty) * n(m.unitCost))),
-        [materials]
-      );
-      const matTaxable = useMemo(
-        () => sum(materials.filter(m => m.taxable).map(m => n(m.qty) * n(m.unitCost))),
-        [materials]
-      );
-      const matMarkup = useMemo(
-        () => matSubtotal * (n(settings.markupPct) / 100),
-        [matSubtotal, settings.markupPct]
-      );
-      const matContingency = useMemo(
-        () => matSubtotal * (n(settings.contingencyPct) / 100),
-        [matSubtotal, settings.contingencyPct]
-      );
-      const laborSubtotal = useMemo(
-        () => sum(labor.map(l => n(l.rate) * n(l.hours))),
-        [labor]
-      );
-      const otherTotal = useMemo(
-        () => sum(other.map(o => n(o.cost))),
-        [other]
-      );
-      const matTax = useMemo(() => {
-        // You wanted materials-only tax (labor not taxed by default)
-        const base = matTaxable + matMarkup + matContingency + (settings.taxLabor ? laborSubtotal : 0);
-        return base * (n(settings.taxRate) / 100);
-      }, [matTaxable, matMarkup, matContingency, settings.taxLabor, laborSubtotal, settings.taxRate]);
-
-      const grandTotalRaw = useMemo(
-        () => matSubtotal + matMarkup + matContingency + matTax + laborSubtotal + otherTotal,
-        [matSubtotal, matMarkup, matContingency, matTax, laborSubtotal, otherTotal]
-      );
-      const grandTotal = useMemo(
-        () => (settings.roundTotal ? Math.round(grandTotalRaw) : round2(grandTotalRaw)),
-        [grandTotalRaw, settings.roundTotal]
-      );
-      const deposit = useMemo(
-        () => round2(grandTotal * (n(settings.depositPct) / 100)),
-        [grandTotal, settings.depositPct]
-      );
 
       const resetAll = () => {
         if (confirm("Clear all data?")) {
@@ -156,259 +109,138 @@
           labor,
           other,
           settings,
-          totals: {
-            matSubtotal,
-            matMarkup,
-            matContingency,
-            matTax,
-            laborSubtotal,
-            otherTotal,
-            grandTotal,
-            deposit
-          }
+          totals: { matSubtotal, laborSubtotal, otherTotal, grandTotal, deposit }
         });
       };
 
       return (
         <div className="min-h-screen bg-slate-50 text-slate-900 p-6">
           <div className="max-w-6xl mx-auto space-y-6">
-            {/* Header */}
+
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                {settings.logoUrl ? (
-                  <img src={settings.logoUrl} alt="Logo" className="h-10 w-10 rounded-xl object-cover border border-slate-200" />
-                ) : (
-                  <div className="h-10 w-10 rounded-xl bg-slate-200 grid place-items-center text-slate-500 text-sm">HD</div>
-                )}
-                <div>
-                  <h1 className="text-2xl font-bold">Honey-Do Hero — Estimator</h1>
-                  <p className="text-slate-600 text-sm">Build estimates and export a branded, client-ready PDF.</p>
-                </div>
-              </div>
-              <div className="flex gap-2 print:hidden">
-                <button onClick={exportPdf} className="px-4 py-2 bg-slate-900 text-white rounded-xl shadow hover:opacity-90">
+              <h1 className="text-2xl font-bold flex items-center gap-2">
+                <img src="https://your-logo-url.com/logo.png" alt="Honey-Do Hero" className="h-10 w-10 rounded"/>
+                Honey-Do Hero — Estimator
+              </h1>
+              <div className="flex gap-2">
+                <button
+                  onClick={exportPdf}
+                  className="px-3 py-1 bg-slate-900 text-white rounded"
+                >
                   Export Bid (PDF)
                 </button>
-                <button onClick={resetAll} className="px-4 py-2 bg-white border rounded-xl shadow hover:bg-slate-100">
+                <button onClick={resetAll} className="px-3 py-1 bg-white border rounded">
                   Reset
                 </button>
               </div>
             </div>
 
-            {/* Project Info */}
             <Card>
-              <h2 className="text-lg font-semibold mb-4">Project Info</h2>
-              <div className="grid md:grid-cols-2 gap-4">
-                <Input label="Client Name" value={project.clientName} onChange={v=>setProject({...project,clientName:v})} />
-                <Input label="Project Name" value={project.projectName} onChange={v=>setProject({...project,projectName:v})} />
-                <Input label="Location" value={project.location} onChange={v=>setProject({...project,location:v})} />
-                <Input label="Estimate #" value={project.estimateNo} onChange={v=>setProject({...project,estimateNo:v})} />
-                <Input type="date" label="Date" value={project.date} onChange={v=>setProject({...project,date:v})} />
-              </div>
+              <h2 className="font-semibold mb-2">Project Info</h2>
+              <Input label="Client Name"   value={project.clientName}  onChange={v=>setProject({...project, clientName:v})} />
+              <Input label="Project Name"  value={project.projectName} onChange={v=>setProject({...project, projectName:v})} />
+              <Input label="Location"      value={project.location}    onChange={v=>setProject({...project, location:v})} />
+              <Input label="Estimate #"    value={project.estimateNo}  onChange={v=>setProject({...project, estimateNo:v})} />
+              <Input label="Date" type="date" value={project.date}     onChange={v=>setProject({...project, date:v})} />
             </Card>
 
-            {/* Materials */}
             <Card>
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-lg font-semibold">Materials</h2>
-                <button
-                  onClick={()=>setMaterials(ms=>[...ms,{id:cid(),desc:"",qty:1,unitCost:0,taxable:true}])}
-                  className="px-3 py-1 rounded-lg bg-white border shadow hover:bg-slate-50"
-                >+ Add Item</button>
-              </div>
-              <div className="space-y-2">
-                {materials.map(m=>(
-                  <div key={m.id} className="grid md:grid-cols-12 gap-2 items-center">
-                    <div className="md:col-span-6">
-                      <input className="w-full border rounded px-2 py-2" placeholder="Description"
-                        value={m.desc}
-                        onChange={e=>setMaterials(ms=>ms.map(x=>x.id===m.id?{...x,desc:e.target.value}:x))} />
-                    </div>
-                    <div className="md:col-span-2">
-                      <input type="number" className="w-full border rounded px-2 py-2 text-center" placeholder="Qty"
-                        value={m.qty}
-                        onChange={e=>setMaterials(ms=>ms.map(x=>x.id===m.id?{...x,qty:n(e.target.value)}:x))} />
-                    </div>
-                    <div className="md:col-span-2">
-                      <input type="number" className="w-full border rounded px-2 py-2 text-center" placeholder="Unit $"
-                        value={m.unitCost}
-                        onChange={e=>setMaterials(ms=>ms.map(x=>x.id===m.id?{...x,unitCost:n(e.target.value)}:x))} />
-                    </div>
-                    <div className="md:col-span-1 text-center">
-                      <label className="inline-flex items-center gap-2 text-sm">
-                        <input type="checkbox" checked={!!m.taxable}
-                          onChange={e=>setMaterials(ms=>ms.map(x=>x.id===m.id?{...x,taxable:e.target.checked}:x))}/>
-                        <span>Tax</span>
-                      </label>
-                    </div>
-                    <div className="md:col-span-1 text-right font-semibold">
-                      ${(n(m.qty)*n(m.unitCost)).toFixed(2)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-3 text-sm text-slate-700">Subtotal: <strong>{fmt(matSubtotal)}</strong></div>
+              <h2 className="font-semibold mb-2">Materials</h2>
+              <button
+                className="px-2 py-1 bg-white border rounded mb-2"
+                onClick={()=> setMaterials(ms => [...ms, { id: cid(), desc: "", qty: 1, unitCost: 0, taxable: true }])}
+              >+ Add</button>
+              {materials.map(m => (
+                <div key={m.id} className="flex flex-wrap gap-2 mb-2">
+                  <input className="border rounded px-2 py-1 flex-1" placeholder="Description"
+                         value={m.desc}
+                         onChange={e=> setMaterials(ms => ms.map(x => x.id===m.id ? {...x, desc: e.target.value} : x))}/>
+                  <input className="border rounded px-2 py-1 w-24 text-center" type="number" placeholder="Qty"
+                         value={m.qty}
+                         onChange={e=> setMaterials(ms => ms.map(x => x.id===m.id ? {...x, qty: n(e.target.value)} : x))}/>
+                  <input className="border rounded px-2 py-1 w-28 text-center" type="number" placeholder="Unit $"
+                         value={m.unitCost}
+                         onChange={e=> setMaterials(ms => ms.map(x => x.id===m.id ? {...x, unitCost: n(e.target.value)} : x))}/>
+                </div>
+              ))}
+              <div>Subtotal: <strong>{fmt(matSubtotal)}</strong></div>
             </Card>
 
-            {/* Labor */}
             <Card>
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-lg font-semibold">Labor</h2>
-                <button
-                  onClick={()=>setLabor(ls=>[...ls,{id:cid(),role:"",rate:0,hours:0}])}
-                  className="px-3 py-1 rounded-lg bg-white border shadow hover:bg-slate-50"
-                >+ Add Role</button>
-              </div>
-              <div className="space-y-2">
-                {labor.map(l=>(
-                  <div key={l.id} className="grid md:grid-cols-12 gap-2 items-center">
-                    <div className="md:col-span-6">
-                      <input className="w-full border rounded px-2 py-2" placeholder="Role / Description"
-                        value={l.role}
-                        onChange={e=>setLabor(ls=>ls.map(x=>x.id===l.id?{...x,role:e.target.value}:x))} />
-                    </div>
-                    <div className="md:col-span-2">
-                      <input type="number" className="w-full border rounded px-2 py-2 text-center" placeholder="Rate $/hr"
-                        value={l.rate}
-                        onChange={e=>setLabor(ls=>ls.map(x=>x.id===l.id?{...x,rate:n(e.target.value)}:x))} />
-                    </div>
-                    <div className="md:col-span-2">
-                      <input type="number" className="w-full border rounded px-2 py-2 text-center" placeholder="Hours"
-                        value={l.hours}
-                        onChange={e=>setLabor(ls=>ls.map(x=>x.id===l.id?{...x,hours:n(e.target.value)}:x))} />
-                    </div>
-                    <div className="md:col-span-2 text-right font-semibold">
-                      ${(n(l.rate)*n(l.hours)).toFixed(2)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-3 text-sm text-slate-700">Labor Total: <strong>{fmt(laborSubtotal)}</strong></div>
+              <h2 className="font-semibold mb-2">Labor</h2>
+              <button
+                className="px-2 py-1 bg-white border rounded mb-2"
+                onClick={()=> setLabor(ls => [...ls, { id: cid(), role: "", rate: 0, hours: 0 }])}
+              >+ Add</button>
+              {labor.map(l => (
+                <div key={l.id} className="flex flex-wrap gap-2 mb-2">
+                  <input className="border rounded px-2 py-1 flex-1" placeholder="Role / Description"
+                         value={l.role}
+                         onChange={e=> setLabor(ls => ls.map(x => x.id===l.id ? {...x, role: e.target.value} : x))}/>
+                  <input className="border rounded px-2 py-1 w-28 text-center" type="number" placeholder="Rate $/hr"
+                         value={l.rate}
+                         onChange={e=> setLabor(ls => ls.map(x => x.id===l.id ? {...x, rate: n(e.target.value)} : x))}/>
+                  <input className="border rounded px-2 py-1 w-24 text-center" type="number" placeholder="Hours"
+                         value={l.hours}
+                         onChange={e=> setLabor(ls => ls.map(x => x.id===l.id ? {...x, hours: n(e.target.value)} : x))}/>
+                </div>
+              ))}
+              <div>Total: <strong>{fmt(laborSubtotal)}</strong></div>
             </Card>
 
-            {/* Other */}
             <Card>
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-lg font-semibold">Other</h2>
-                <button
-                  onClick={()=>setOther(os=>[...os,{id:cid(),desc:"",cost:0}])}
-                  className="px-3 py-1 rounded-lg bg-white border shadow hover:bg-slate-50"
-                >+ Add Item</button>
-              </div>
-              <div className="space-y-2">
-                {other.map(o=>(
-                  <div key={o.id} className="grid md:grid-cols-12 gap-2 items-center">
-                    <div className="md:col-span-9">
-                      <input className="w-full border rounded px-2 py-2" placeholder="Description"
-                        value={o.desc}
-                        onChange={e=>setOther(os=>os.map(x=>x.id===o.id?{...x,desc:e.target.value}:x))} />
-                    </div>
-                    <div className="md:col-span-3 text-right">
-                      <input type="number" className="w-full border rounded px-2 py-2 text-center" placeholder="Cost $"
-                        value={o.cost}
-                        onChange={e=>setOther(os=>os.map(x=>x.id===o.id?{...x,cost:n(e.target.value)}:x))} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-3 text-sm text-slate-700">Other Total: <strong>{fmt(otherTotal)}</strong></div>
+              <h2 className="font-semibold mb-2">Other</h2>
+              <button
+                className="px-2 py-1 bg-white border rounded mb-2"
+                onClick={()=> setOther(os => [...os, { id: cid(), desc: "", cost: 0 }])}
+              >+ Add</button>
+              {other.map(o => (
+                <div key={o.id} className="flex flex-wrap gap-2 mb-2">
+                  <input className="border rounded px-2 py-1 flex-1" placeholder="Description"
+                         value={o.desc}
+                         onChange={e=> setOther(os => os.map(x => x.id===o.id ? {...x, desc: e.target.value} : x))}/>
+                  <input className="border rounded px-2 py-1 w-32 text-center" type="number" placeholder="Cost $"
+                         value={o.cost}
+                         onChange={e=> setOther(os => os.map(x => x.id===o.id ? {...x, cost: n(e.target.value)} : x))}/>
+                </div>
+              ))}
+              <div>Total: <strong>{fmt(otherTotal)}</strong></div>
             </Card>
 
-            {/* Settings */}
             <Card>
-              <h2 className="text-lg font-semibold mb-3">Settings</h2>
-              <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <Input label="Logo URL (optional)" value={settings.logoUrl} onChange={v=>setSettings({...settings,logoUrl:v})} />
-                <NumberInput label="Sales Tax % (materials)" value={settings.taxRate} onChange={v=>setSettings({...settings,taxRate:v})} />
-                <Toggle label="Apply Tax to Labor" checked={settings.taxLabor} onChange={v=>setSettings({...settings,taxLabor:v})} />
-                <NumberInput label="Markup % (materials)" value={settings.markupPct} onChange={v=>setSettings({...settings,markupPct:v})} />
-                <NumberInput label="Contingency % (materials)" value={settings.contingencyPct} onChange={v=>setSettings({...settings,contingencyPct:v})} />
-                <NumberInput label="Deposit %" value={settings.depositPct} onChange={v=>setSettings({...settings,depositPct:v})} />
-                <Toggle label="Round Grand Total" checked={settings.roundTotal} onChange={v=>setSettings({...settings,roundTotal:v})} />
-              </div>
-              <div className="mt-3">
-                <label className="text-sm font-medium">Default Notes (shown on PDF)</label>
-                <textarea className="w-full border rounded px-3 py-2 mt-1" rows={4}
-                  value={settings.notes}
-                  onChange={e=>setSettings({...settings,notes:e.target.value})}
-                ></textarea>
-              </div>
+              <h2 className="font-semibold mb-2">Summary</h2>
+              <div>Grand Total: <strong>{fmt(grandTotal)}</strong></div>
+              <div>Deposit: <strong>{fmt(deposit)}</strong></div>
             </Card>
 
-            {/* Summary */}
-            <Card>
-              <h2 className="text-lg font-semibold mb-3">Summary</h2>
-              <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
-                <Stat label="Materials Subtotal" value={fmt(matSubtotal)} />
-                <Stat label="Markup" value={fmt(matMarkup)} />
-                <Stat label="Contingency" value={fmt(matContingency)} />
-                <Stat label={`Sales Tax (${settings.taxRate}%)`} value={fmt(matTax)} />
-                <Stat label="Labor" value={fmt(laborSubtotal)} />
-                <Stat label="Other" value={fmt(otherTotal)} />
-                <Stat label="Grand Total" value={<b>{fmt(grandTotal)}</b>} />
-                <Stat label={`Deposit (${settings.depositPct}%)`} value={fmt(deposit)} />
-              </div>
-              <div className="mt-4 print:hidden">
-                <button onClick={exportPdf} className="px-4 py-2 bg-slate-900 text-white rounded-xl shadow hover:opacity-90">
-                  Export Bid (PDF)
-                </button>
-              </div>
-            </Card>
           </div>
         </div>
       );
     }
 
-    // ---------- UI Components ----------
     function Card({children}) {
-      return <div className="bg-white p-5 rounded-2xl shadow border border-slate-200">{children}</div>;
+      return <div className="bg-white p-4 rounded shadow mb-4">{children}</div>;
     }
-    function Input({label,value,onChange,type="text"}) {
+    function Input({label, value, onChange, type="text"}) {
       return (
-        <label className="text-sm">
-          <div className="font-medium mb-1">{label}</div>
-          <input type={type} className="w-full border rounded px-3 py-2" value={value} onChange={e=>onChange(e.target.value)} />
+        <label className="block mb-2">
+          <div className="text-sm font-medium mb-1">{label}</div>
+          <input type={type} className="border rounded px-2 py-1 w-full" value={value} onChange={e=>onChange(e.target.value)} />
         </label>
       );
     }
-    function NumberInput({label,value,onChange}) {
-      return (
-        <label className="text-sm">
-          <div className="font-medium mb-1">{label}</div>
-          <input type="number" className="w-full border rounded px-3 py-2" value={value} onChange={e=>onChange(n(e.target.value))} />
-        </label>
-      );
-    }
-    function Toggle({label,checked,onChange}) {
-      return (
-        <label className="flex items-center gap-2 text-sm select-none">
-          <input type="checkbox" checked={checked} onChange={e=>onChange(e.target.checked)} />
-          <span>{label}</span>
-        </label>
-      );
-    }
-    function Stat({label,value}) {
-      return (
-        <div className="bg-slate-100 rounded-xl p-3 border border-slate-200">
-          <div className="text-xs text-slate-600">{label}</div>
-          <div className="text-lg">{value}</div>
-        </div>
-      );
-    }
 
-    // ---------- Utils ----------
-    function cid(){return Math.random().toString(36).slice(2,11)}
-    function n(v){const x=parseFloat(v); return isNaN(x)?0:x;}
-    function sum(a){return a.reduce((x,y)=>x+y,0)}
-    function round2(v){return Math.round((v+Number.EPSILON)*100)/100}
-    function fmt(v){return `$${Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`}
+    // ---------- utils ----------
+    function cid(){ return Math.random().toString(36).slice(2,11); }
+    function n(v){ const x = parseFloat(v); return isNaN(x) ? 0 : x; }
+    function sum(a){ return a.reduce((x,y)=>x+y,0); }
+    function round2(v){ return Math.round((v+Number.EPSILON)*100)/100; }
+    function fmt(v){ return `$${Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`; }
+    function esc(s){ return String(s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
-    // ---------- Export Bid (PDF) ----------
-    function esc(s){return String(s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
-
-    function generateBidHtml({project, materials, labor, other, settings, totals}) {
+    // ---------- PDF: build DOM element instead of passing raw HTML string ----------
+    function buildBidElement({project, materials, labor, other, settings, totals}) {
       const today = new Date().toLocaleDateString();
-      const title = `Estimate / Bid — ${project.projectName || 'Project'}`;
 
       const matRows = materials.map(m => `
         <tr>
@@ -432,137 +264,141 @@
           <td class="num">$${n(o.cost).toFixed(2)}</td>
         </tr>`).join('');
 
-      // Payment terms & signature section (edit freely in Settings.notes if you prefer)
-      const terms = `
-• 50% deposit due upon acceptance to schedule the job.
-• Remaining balance due upon completion.
-• Materials are taxed; labor is not (unless noted).
-• Estimate valid for 30 days unless otherwise agreed.
-• We warrant workmanship to be professional and to industry standards.`;
+      const host = document.createElement('div');
+      host.style.background = '#ffffff';
+      host.style.padding = '24px';
+      host.style.boxSizing = 'border-box';
+      host.innerHTML = `
+        <style>
+          body, * { box-sizing: border-box; }
+          .wrap{max-width:900px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;color:#0f172a;}
+          h1{font-size:22px;margin:0 0 6px 0}
+          h2{font-size:16px;margin:18px 0 8px 0}
+          .muted{color:#64748b}
+          .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+          table{width:100%;border-collapse:collapse;margin-top:6px}
+          th,td{border:1px solid #e2e8f0;padding:8px;font-size:12px;vertical-align:top}
+          th{background:#f1f5f9;text-align:left}
+          td.num{text-align:right;white-space:nowrap}
+          .totals{width:100%;border-collapse:collapse;margin-top:8px}
+          .totals td{border:none;padding:4px;font-size:13px}
+          .totals .label{text-align:right;color:#334155}
+          .totals .val{text-align:right;font-weight:600}
+          .box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px}
+          .small{font-size:11px;color:#475569;white-space:pre-wrap}
+          .brand{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+          .brand img{height:40px;width:40px;border-radius:10px;object-fit:cover;border:1px solid #e2e8f0}
+          .sign-row{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:18px}
+          .sign-box{border-top:1px solid #cbd5e1;padding-top:6px;font-size:12px}
+        </style>
 
-      return `
-<!doctype html>
-<html><head><meta charset="utf-8"/><title>${esc(title)}</title>
-<style>
-  body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;color:#0f172a;}
-  .wrap{max-width:900px;margin:0 auto;padding:24px;}
-  h1{font-size:22px;margin:0 0 4px 0}
-  h2{font-size:16px;margin:20px 0 8px 0}
-  .muted{color:#64748b}
-  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-  table{width:100%;border-collapse:collapse;margin-top:6px}
-  th,td{border:1px solid #e2e8f0;padding:8px;font-size:12px;vertical-align:top}
-  th{background:#f1f5f9;text-align:left}
-  td.num{text-align:right;white-space:nowrap}
-  .totals{width:100%;border-collapse:collapse;margin-top:8px}
-  .totals td{border:none;padding:4px;font-size:13px}
-  .totals .label{text-align:right;color:#334155}
-  .totals .val{text-align:right;font-weight:600}
-  .box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px}
-  .small{font-size:11px;color:#475569;white-space:pre-wrap}
-  .brand{display:flex;align-items:center;gap:12px;margin-bottom:10px}
-  .brand img{height:40px;width:40px;border-radius:10px;object-fit:cover;border:1px solid #e2e8f0}
-  .sign-row{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:18px}
-  .sign-box{border-top:1px solid #cbd5e1;padding-top:6px;font-size:12px}
-</style></head>
-<body>
-  <div class="wrap">
-    <div class="brand">
-      ${settings.logoUrl ? `<img src="${esc(settings.logoUrl)}" alt="Logo"/>` : `<div style="height:40px;width:40px;border-radius:10px;background:#e2e8f0;display:grid;place-items:center;color:#475569;font-weight:700">HD</div>`}
-      <div>
-        <h1>Honey-Do Hero — Estimate</h1>
-        <div class="muted">Date: ${esc(project.date || today)} &nbsp;•&nbsp; Estimate #: ${esc(project.estimateNo || '-')}</div>
-      </div>
-    </div>
+        <div class="wrap">
+          <div class="brand">
+            <img src="https://your-logo-url.com/logo.png" alt="Logo"/>
+            <div>
+              <h1>Honey-Do Hero — Estimate</h1>
+              <div class="muted">Date: ${esc(project.date || today)} &nbsp;•&nbsp; Estimate #: ${esc(project.estimateNo || '-')}</div>
+            </div>
+          </div>
 
-    <div class="grid box">
-      <div>
-        <strong>Client</strong><br/>
-        ${esc(project.clientName || '')}<br/>
-        ${esc(project.location || '')}
-      </div>
-      <div>
-        <strong>Project</strong><br/>
-        ${esc(project.projectName || '')}
-      </div>
-    </div>
+          <div class="grid box">
+            <div>
+              <strong>Client</strong><br/>
+              ${esc(project.clientName || '')}<br/>
+              ${esc(project.location || '')}
+            </div>
+            <div>
+              <strong>Project</strong><br/>
+              ${esc(project.projectName || '')}
+            </div>
+          </div>
 
-    <h2>Materials</h2>
-    <table>
-      <thead><tr><th>Description</th><th>Qty</th><th>Unit $</th><th>Line Total</th></tr></thead>
-      <tbody>${matRows || '<tr><td colspan="4" class="muted">No materials listed</td></tr>'}</tbody>
-    </table>
+          <h2>Materials</h2>
+          <table>
+            <thead><tr><th>Description</th><th>Qty</th><th>Unit $</th><th>Line Total</th></tr></thead>
+            <tbody>${matRows || '<tr><td colspan="4" class="muted">No materials listed</td></tr>'}</tbody>
+          </table>
 
-    <h2>Labor</h2>
-    <table>
-      <thead><tr><th>Role</th><th>Rate</th><th>Hrs</th><th>Subtotal</th></tr></thead>
-      <tbody>${laborRows || '<tr><td colspan="4" class="muted">No labor items listed</td></tr>'}</tbody>
-    </table>
+          <h2>Labor</h2>
+          <table>
+            <thead><tr><th>Role</th><th>Rate</th><th>Hrs</th><th>Subtotal</th></tr></thead>
+            <tbody>${laborRows || '<tr><td colspan="4" class="muted">No labor items listed</td></tr>'}</tbody>
+          </table>
 
-    <h2>Other Services</h2>
-    <table>
-      <thead><tr><th colspan="3">Description</th><th>Total</th></tr></thead>
-      <tbody>${otherRows || '<tr><td colspan="4" class="muted">No other items listed</td></tr>'}</tbody>
-    </table>
+          <h2>Other Services</h2>
+          <table>
+            <thead><tr><th colspan="3">Description</th><th>Total</th></tr></thead>
+            <tbody>${otherRows || '<tr><td colspan="4" class="muted">No other items listed</td></tr>'}</tbody>
+          </table>
 
-    <table class="totals">
-      <tr><td class="label">Materials Subtotal:</td><td class="val">${fmt(totals.matSubtotal)}</td></tr>
-      <tr><td class="label">Markup:</td><td class="val">${fmt(totals.matMarkup)}</td></tr>
-      <tr><td class="label">Contingency:</td><td class="val">${fmt(totals.matContingency)}</td></tr>
-      <tr><td class="label">Sales Tax (${n(settings.taxRate).toFixed(2)}%):</td><td class="val">${fmt(totals.matTax)}</td></tr>
-      <tr><td class="label">Labor:</td><td class="val">${fmt(totals.laborSubtotal)}</td></tr>
-      <tr><td class="label">Other Services:</td><td class="val">${fmt(totals.otherTotal)}</td></tr>
-      <tr><td class="label"><strong>Grand Total:</strong></td><td class="val"><strong>${fmt(totals.grandTotal)}</strong></td></tr>
-      <tr><td class="label">Deposit (${n(settings.depositPct)}%):</td><td class="val">${fmt(totals.deposit)}</td></tr>
-    </table>
+          <table class="totals">
+            <tr><td class="label">Materials:</td><td class="val">${fmt(totals.matSubtotal)}</td></tr>
+            <tr><td class="label">Labor:</td><td class="val">${fmt(totals.laborSubtotal)}</td></tr>
+            <tr><td class="label">Other:</td><td class="val">${fmt(totals.otherTotal)}</td></tr>
+            <tr><td class="label"><strong>Grand Total:</strong></td><td class="val"><strong>${fmt(totals.grandTotal)}</strong></td></tr>
+            <tr><td class="label">Deposit (${n(settings.depositPct)}%):</td><td class="val">${fmt(totals.deposit)}</td></tr>
+          </table>
 
-    <div class="box" style="margin-top:10px">
-      <strong>Notes</strong>
-      <div class="small">${esc(settings.notes || 'Thank you for the opportunity!')}</div>
-    </div>
+          <div class="box" style="margin-top:10px">
+            <strong>Notes</strong>
+            <div class="small">${esc(settings.notes || 'Thank you for the opportunity!')}</div>
+          </div>
 
-    <div class="box" style="margin-top:10px">
-      <strong>Payment Terms</strong>
-      <div class="small">${esc(terms)}</div>
-    </div>
-
-    <div class="sign-row">
-      <div class="sign-box">Client Signature</div>
-      <div class="sign-box">Contractor Signature</div>
-    </div>
-    <div class="sign-row">
-      <div class="sign-box">Date</div>
-      <div class="sign-box">Date</div>
-    </div>
-
-  </div>
-</body></html>`;
+          <div class="sign-row">
+            <div class="sign-box">Client Signature</div>
+            <div class="sign-box">Contractor Signature</div>
+          </div>
+          <div class="sign-row">
+            <div class="sign-box">Date</div>
+            <div class="sign-box">Date</div>
+          </div>
+        </div>
+      `;
+      return host;
     }
 
-    function exportBidPdf(ctx) {
-      const html = generateBidHtml(ctx);
-      const fname =
-        `${(ctx.project.clientName || 'client').replace(/\s+/g,'_')}_` +
-        `${(ctx.project.projectName || 'estimate').replace(/\s+/g,'_')}_Bid.pdf`;
+    async function waitForImages(el) {
+      const imgs = Array.from(el.querySelectorAll('img'));
+      if (imgs.length === 0) return;
+      await Promise.all(imgs.map(img => {
+        if (img.complete) return;
+        return new Promise(res => { img.onload = res; img.onerror = res; });
+      }));
+    }
 
-      const opt = {
-        margin: 10,
-        filename: fname,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true },
-        jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' }
-      };
+    async function exportBidPdf(ctx) {
+      try {
+        if (!window.html2pdf) throw new Error("PDF engine not loaded");
+        const host = document.getElementById('pdf-host');
+        host.innerHTML = ""; // clear old content
 
-      if (!window.html2pdf) {
-        alert('PDF engine not loaded. Check your connection and try again.');
-        return;
+        const content = buildBidElement(ctx);
+        host.appendChild(content);
+
+        // Make sure all images (logo, etc.) are loaded; prevents blank PDFs
+        await waitForImages(host);
+
+        const fname =
+          `${(ctx.project.clientName || 'client').replace(/\s+/g,'_')}_` +
+          `${(ctx.project.projectName || 'estimate').replace(/\s+/g,'_')}_Bid.pdf`;
+
+        const opt = {
+          margin: 10,
+          filename: fname,
+          image: { type: 'jpeg', quality: 0.98 },
+          html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+          jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' }
+        };
+
+        await window.html2pdf().set(opt).from(host).save();
+      } catch (e) {
+        alert("PDF export failed: " + (e?.message || e));
       }
-      window.html2pdf().set(opt).from(html).save();
     }
 
-    // ---------- Mount ----------
+    // ---------- mount ----------
     const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<EstimatorApp/>);
+    root.render(<EstimatorApp />);
   </script>
 </body>
 </html>
